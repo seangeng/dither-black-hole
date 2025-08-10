@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
@@ -115,8 +115,23 @@ export default function BlackHoleVisualization() {
     scene?: THREE.Scene;
     renderer?: THREE.WebGLRenderer;
     animationId?: number;
+    dither?: any;
     cleanup?: () => void;
   }>({});
+
+  const [showControls, setShowControls] = useState(true);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      if (e.key === "h" || e.key === "H") {
+        setShowControls(!showControls);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyPress);
+    return () => window.removeEventListener("keydown", handleKeyPress);
+  }, [showControls]);
 
   useEffect(() => {
     let mounted = true;
@@ -145,6 +160,12 @@ export default function BlackHoleVisualization() {
           ),
           noisesFragment: await loadShaderWithIncludes(
             "/shaders/noises/fragment.glsl"
+          ),
+          ditherVertex: await fetch("/shaders/dither/vertex.glsl").then((r) =>
+            r.text()
+          ),
+          ditherFragment: await fetch("/shaders/dither/fragment.glsl").then(
+            (r) => r.text()
           ),
         };
 
@@ -178,6 +199,11 @@ export default function BlackHoleVisualization() {
           );
 
           composition.defaultRenderTarget.setSize(
+            sizes.width * renderer.getPixelRatio(),
+            sizes.height * renderer.getPixelRatio()
+          );
+
+          composition.preDistortionRenderTarget.setSize(
             sizes.width * renderer.getPixelRatio(),
             sizes.height * renderer.getPixelRatio()
           );
@@ -414,6 +440,15 @@ export default function BlackHoleVisualization() {
           }
         );
 
+        // Add render target for dithering effect
+        composition.preDistortionRenderTarget = new THREE.WebGLRenderTarget(
+          sizes.width * renderer.getPixelRatio(),
+          sizes.height * renderer.getPixelRatio(),
+          {
+            generateMipmaps: false,
+          }
+        );
+
         // Custom scene
         composition.scene = new THREE.Scene();
         composition.camera = new THREE.OrthographicCamera(
@@ -435,7 +470,9 @@ export default function BlackHoleVisualization() {
           fragmentShader: shaders.compositionFragment,
           uniforms: {
             uTime: { value: 0 },
-            uDefaultTexture: { value: composition.defaultRenderTarget.texture },
+            uDefaultTexture: {
+              value: composition.preDistortionRenderTarget.texture,
+            },
             uDistortionTexture: {
               value: composition.distortionRenderTarget.texture,
             },
@@ -447,6 +484,42 @@ export default function BlackHoleVisualization() {
           composition.plane.material
         );
         composition.scene.add(composition.plane.mesh);
+
+        /**
+         * Dither Effect
+         */
+        const dither: any = {};
+        dither.scene = new THREE.Scene();
+        dither.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+        dither.camera.position.set(0, 0, 5);
+        dither.scene.add(dither.camera);
+
+        // Dither plane
+        dither.plane = {};
+        dither.plane.geometry = new THREE.PlaneGeometry(2, 2);
+        dither.plane.material = new THREE.ShaderMaterial({
+          vertexShader: shaders.ditherVertex,
+          fragmentShader: shaders.ditherFragment,
+          uniforms: {
+            tDiffuse: { value: null },
+            resolution: {
+              value: new THREE.Vector2(
+                sizes.width * renderer.getPixelRatio(),
+                sizes.height * renderer.getPixelRatio()
+              ),
+            },
+            gridSize: { value: 3.0 },
+            intensity: { value: 0.7 },
+            time: { value: 0 },
+            backgroundColor: { value: new THREE.Vector3(0.0, 0.0, 0.0) },
+            contrast: { value: 1.2 },
+          },
+        });
+        dither.plane.mesh = new THREE.Mesh(
+          dither.plane.geometry,
+          dither.plane.material
+        );
+        dither.scene.add(dither.plane.mesh);
 
         /**
          * Tick loop
@@ -461,6 +534,13 @@ export default function BlackHoleVisualization() {
 
           // Update Disc
           disc.material.uniforms.uTime.value = time;
+
+          // Update dither effect
+          dither.plane.material.uniforms.time.value = time;
+          dither.plane.material.uniforms.resolution.value.set(
+            sizes.width * renderer.getPixelRatio(),
+            sizes.height * renderer.getPixelRatio()
+          );
 
           // Update camera and controls
           controls.update();
@@ -500,8 +580,8 @@ export default function BlackHoleVisualization() {
           );
           composition.plane.material.uniforms.uTime.value = time;
 
-          // Render default scene
-          renderer.setRenderTarget(composition.defaultRenderTarget);
+          // Render default scene to intermediate target
+          renderer.setRenderTarget(composition.preDistortionRenderTarget);
           renderer.setClearColor("#130e16");
           renderer.render(scene, camera);
           renderer.setRenderTarget(null);
@@ -512,8 +592,16 @@ export default function BlackHoleVisualization() {
           renderer.render(distortion.scene, camera);
           renderer.setRenderTarget(null);
 
-          // Render composition scene
+          // Render composition scene to default target
+          renderer.setRenderTarget(composition.defaultRenderTarget);
+          renderer.setClearColor("#130e16");
           renderer.render(composition.scene, composition.camera);
+          renderer.setRenderTarget(null);
+
+          // Apply dithering effect as final pass
+          dither.plane.material.uniforms.tDiffuse.value =
+            composition.defaultRenderTarget.texture;
+          renderer.render(dither.scene, dither.camera);
 
           // Keep ticking
           sceneRef.current.animationId = window.requestAnimationFrame(tick);
@@ -523,6 +611,7 @@ export default function BlackHoleVisualization() {
         sceneRef.current = {
           scene,
           renderer,
+          dither,
           cleanup: () => {
             window.removeEventListener("resize", handleResize);
             controls.dispose();
@@ -549,5 +638,144 @@ export default function BlackHoleVisualization() {
     };
   }, []);
 
-  return <div ref={mountRef} className="w-full h-full" />;
+  return (
+    <div ref={mountRef} className="w-full h-full relative">
+      {/* Toggle Controls Button */}
+      <button
+        onClick={() => setShowControls(!showControls)}
+        className="absolute top-4 right-4 bg-black bg-opacity-80 backdrop-blur-sm px-3 py-2 rounded-lg border border-white border-opacity-20 text-white text-xs shadow-lg hover:bg-opacity-90 transition-all z-20"
+        title="Toggle controls (Press H)"
+      >
+        {showControls ? "✕" : "⚙️"} Controls
+      </button>
+
+      {/* Dither Controls */}
+      {showControls && (
+        <div className="absolute top-16 right-4 bg-black bg-opacity-85 backdrop-blur-sm p-4 rounded-lg border border-white border-opacity-20 text-white text-sm max-w-64 shadow-lg z-10">
+          <div className="mb-3">
+            <label className="block mb-1 text-xs">Grid Size</label>
+            <input
+              type="range"
+              min="1"
+              max="8"
+              step="0.5"
+              defaultValue="3"
+              onChange={(e) => {
+                if (sceneRef.current.dither) {
+                  sceneRef.current.dither.plane.material.uniforms.gridSize.value =
+                    parseFloat(e.target.value);
+                }
+              }}
+              className="w-full"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="block mb-1 text-xs">Dither Intensity</label>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.1"
+              defaultValue="0.7"
+              onChange={(e) => {
+                if (sceneRef.current.dither) {
+                  sceneRef.current.dither.plane.material.uniforms.intensity.value =
+                    parseFloat(e.target.value);
+                }
+              }}
+              className="w-full"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="block mb-1 text-xs">Contrast</label>
+            <input
+              type="range"
+              min="0.5"
+              max="3"
+              step="0.1"
+              defaultValue="1.2"
+              onChange={(e) => {
+                if (sceneRef.current.dither) {
+                  sceneRef.current.dither.plane.material.uniforms.contrast.value =
+                    parseFloat(e.target.value);
+                }
+              }}
+              className="w-full"
+            />
+          </div>
+          <div className="mb-3">
+            <label className="block mb-1 text-xs">Background Color</label>
+            <div className="flex gap-2 items-center">
+              <input
+                type="color"
+                defaultValue="#000000"
+                onChange={(e) => {
+                  if (sceneRef.current.dither) {
+                    const hex = e.target.value;
+                    // Convert hex to RGB values (0-1 range)
+                    const r = parseInt(hex.slice(1, 3), 16) / 255;
+                    const g = parseInt(hex.slice(3, 5), 16) / 255;
+                    const b = parseInt(hex.slice(5, 7), 16) / 255;
+                    sceneRef.current.dither.plane.material.uniforms.backgroundColor.value.set(
+                      r,
+                      g,
+                      b
+                    );
+                  }
+                }}
+                className="w-8 h-6 rounded border border-white cursor-pointer"
+                title="Custom Color"
+              />
+              <div className="flex gap-1">
+                <button
+                  onClick={() => {
+                    if (sceneRef.current.dither) {
+                      sceneRef.current.dither.plane.material.uniforms.backgroundColor.value.set(
+                        0,
+                        0,
+                        0
+                      );
+                    }
+                  }}
+                  className="w-5 h-5 bg-black border border-white rounded-sm"
+                  title="Black"
+                />
+                <button
+                  onClick={() => {
+                    if (sceneRef.current.dither) {
+                      sceneRef.current.dither.plane.material.uniforms.backgroundColor.value.set(
+                        0.1,
+                        0.1,
+                        0.2
+                      );
+                    }
+                  }}
+                  className="w-5 h-5 border border-white rounded-sm"
+                  style={{ backgroundColor: "rgb(25, 25, 51)" }}
+                  title="Dark Blue"
+                />
+                <button
+                  onClick={() => {
+                    if (sceneRef.current.dither) {
+                      sceneRef.current.dither.plane.material.uniforms.backgroundColor.value.set(
+                        0.2,
+                        0.1,
+                        0.2
+                      );
+                    }
+                  }}
+                  className="w-5 h-5 border border-white rounded-sm"
+                  style={{ backgroundColor: "rgb(51, 25, 51)" }}
+                  title="Dark Purple"
+                />
+              </div>
+            </div>
+          </div>
+          <div>
+            <small className="text-xs opacity-75">High-Contrast Dither</small>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
