@@ -639,7 +639,7 @@ export default function BlackHoleVisualization() {
   }, []);
 
   return (
-    <div ref={mountRef} className="w-full h-full relative">
+    <div className="w-full h-full relative">
       {/* Toggle Controls Button */}
       <button
         onClick={() => setShowControls(!showControls)}
@@ -651,7 +651,7 @@ export default function BlackHoleVisualization() {
 
       {/* Dither Controls */}
       {showControls && (
-        <div className="absolute top-16 right-4 bg-black bg-opacity-85 backdrop-blur-sm p-4 rounded-lg border border-white border-opacity-20 text-white text-sm max-w-64 shadow-lg z-10">
+        <div className="absolute top-16 right-4 bg-black bg-opacity-85 backdrop-blur-sm p-4 rounded-lg border border-white border-opacity-20 text-white text-sm w-64 shadow-lg z-10">
           <div className="mb-3">
             <label className="block mb-1 text-xs">Grid Size</label>
             <input
@@ -776,6 +776,7 @@ export default function BlackHoleVisualization() {
           </div>
         </div>
       )}
+      <div ref={mountRef} className="w-full h-full absolute inset-0"></div>
     </div>
   );
 }
